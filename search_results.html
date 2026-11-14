@@ -2602,6 +2602,11 @@
       };
 
       const GEMINI_KEY_STORAGE = "ashiato_gemini_api_key";
+      const GEMINI_MODELS = [
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+      ];
+      const GEMINI_THINKING_LEVEL = "low";
       const QUICK_QUESTIONS = [
         "当時いちばん辛かった挫折をどう乗り越えましたか？",
         "模試の判定や周囲とのギャップで不安だったときの対策は？",
@@ -2866,6 +2871,57 @@
         return `ご質問ありがとうございます！${uGrade}の時期は「${mentor.troubleText}」などで迷うことも多いですよね。\n\n私の場合は「${failure.title}」という壁にぶつかりましたが、${action.time}に「${action.title}」へ踏み出したことで状況が変わりました。現在の「${mentor.survey.currentJob}」につながった一番の支えは、${mentor.survey.decisionReason}という軸を見つけたことです。応援しています！`;
       }
 
+      async function requestGeminiModel(model, apiKey, payload) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          let errMsg = "";
+          let isInvalidKey = false;
+          try {
+            if (typeof res.json === "function") {
+              const errData = await res.json();
+              errMsg =
+                (errData &&
+                  errData.error &&
+                  (errData.error.message || errData.error.status)) ||
+                "";
+              const details =
+                errData && errData.error && Array.isArray(errData.error.details)
+                  ? errData.error.details
+                  : [];
+              isInvalidKey =
+                details.some((d) => d && d.reason === "API_KEY_INVALID") ||
+                /api[_ ]?key not valid|api[_ ]?key expired/i.test(errMsg);
+            }
+          } catch (e) {}
+          const err = new Error(`HTTP ${res.status}${errMsg ? `: ${errMsg}` : ""}`);
+          err.status = res.status;
+          err.isInvalidKey = isInvalidKey;
+          throw err;
+        }
+        const data = await res.json();
+        const parts =
+          data &&
+          data.candidates &&
+          data.candidates[0] &&
+          data.candidates[0].content &&
+          Array.isArray(data.candidates[0].content.parts)
+            ? data.candidates[0].content.parts
+            : [];
+        const reply = parts
+          .filter((p) => !p.thought)
+          .map((p) => p.text || "")
+          .join("");
+        if (reply && reply.trim()) {
+          return { text: reply.trim(), model };
+        }
+        throw new Error("Empty Gemini response");
+      }
+
       async function askGeminiApi(mentor, questionText, user, history) {
         const apiKey = (localStorage.getItem(GEMINI_KEY_STORAGE) || "").trim();
         if (!apiKey) {
@@ -2905,38 +2961,23 @@
             temperature: 0.7,
             maxOutputTokens: 600,
             thinkingConfig: {
-              thinkingLevel: "low",
+              thinkingLevel: GEMINI_THINKING_LEVEL,
             },
           },
         };
 
-        const model = "gemini-3.5-flash-lite";
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
+        let lastError = null;
+        for (const model of GEMINI_MODELS) {
+          try {
+            return await requestGeminiModel(model, apiKey, payload);
+          } catch (err) {
+            lastError = err;
+            if (err && err.isInvalidKey) {
+              throw err;
+            }
+          }
         }
-        const data = await res.json();
-        const parts =
-          data &&
-          data.candidates &&
-          data.candidates[0] &&
-          data.candidates[0].content &&
-          Array.isArray(data.candidates[0].content.parts)
-            ? data.candidates[0].content.parts
-            : [];
-        const reply = parts
-          .filter((p) => !p.thought)
-          .map((p) => p.text || "")
-          .join("");
-        if (reply && reply.trim()) {
-          return { text: reply.trim(), model };
-        }
-        throw new Error("Empty Gemini response");
+        throw lastError || new Error("Gemini request failed");
       }
 
       async function sendAiQuestion(questionText) {
